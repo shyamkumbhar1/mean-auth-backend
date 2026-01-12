@@ -132,15 +132,15 @@ jobs:
             JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PROD }}"
           fi
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << ENDSSH
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash -c "
             cd ~/mean-auth-app
-            cat > $ENV_FILE << EOF
-MONGODB_URI=$MONGODB_URI
-JWT_SECRET=$JWT_SECRET
-JWT_EXPIRES_IN=$JWT_EXPIRES_IN
-EOF
+            cat > $ENV_FILE << 'ENVEOF'
+          MONGODB_URI=$MONGODB_URI
+          JWT_SECRET=$JWT_SECRET
+          JWT_EXPIRES_IN=$JWT_EXPIRES_IN
+          ENVEOF
             chmod 600 $ENV_FILE
-          ENDSSH
+          "
       
       - name: Deploy Backend
         run: |
@@ -151,32 +151,17 @@ EOF
           EC2_HOST=$(cat /tmp/ec2_host.txt)
           EC2_USER=$(cat /tmp/ec2_user.txt)
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << ENDSSH
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << 'ENDSSH'
             set -e
+            cd ~/mean-auth-app/backend
+            git fetch origin
+            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
+            git pull origin $TARGET_BRANCH
             cd ~/mean-auth-app
-            
-            # Update docker-compose.yml from git
-            git fetch origin
-            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
-            git pull origin $TARGET_BRANCH
-            
-            # Update backend code
-            cd backend
-            git fetch origin
-            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
-            git pull origin $TARGET_BRANCH
-            cd ..
-            
-            # Deploy
-            docker-compose pull $CONTAINER_NAME || true
-            docker-compose up -d --build $CONTAINER_NAME
-            
-            # Cleanup old images
-            docker image prune -f
-            
+            docker-compose -f backend/docker-compose.yml up -d --build backend
             sleep 10
-            docker-compose ps
-            docker-compose logs --tail=50 $CONTAINER_NAME
+            docker-compose -f backend/docker-compose.yml ps
+            docker-compose -f backend/docker-compose.yml logs --tail=50 backend
           ENDSSH
       
       - name: Health Check
