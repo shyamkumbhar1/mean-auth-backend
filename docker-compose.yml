@@ -3,13 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: backend-local
+    container_name: ${CONTAINER_NAME:-backend-local}
     ports:
-      - "3000:3000"
+      - "${APP_PORT:-3000}:3000"
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3000
     volumes:
       - .:/app
