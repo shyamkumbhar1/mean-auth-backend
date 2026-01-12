@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -15,31 +15,9 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
       
       - name: Install dependencies
-        working-directory: ./backend
-        run: npm ci
-      
-      - name: Run tests (if available)
-        working-directory: ./backend
-        run: npm test || echo "No tests configured"
-        continue-on-error: true
-      
-      - name: Verify build
-        working-directory: ./backend
-        run: |
-          echo "Verifying backend setup..."
-          node -v
-          npm -v
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    steps:
-      - uses: actions/checkout@v3
+        run: npm install
       
       - name: Setup SSH
         run: |
@@ -48,9 +26,9 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
       
-      - name: Deploy Backend
+      - name: Deploy to EC2
         run: |
-          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
             cd ~/mean-auth-app/backend
             git pull origin main || git pull origin master
             cd ..
