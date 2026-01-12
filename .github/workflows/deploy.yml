@@ -1,175 +1,229 @@
-name: Backend CI/CD - Multi Environment
+name: Backend CI/CD
 
 on:
   push:
-    branches: [dev, pre-prod, prod]
-  pull_request:
-    types: [closed]
-    branches: [pre-prod]
-  workflow_dispatch:
-    inputs:
-      target_environment:
-        description: 'Target Environment'
-        required: true
-        type: choice
-        options:
-          - DEV
-          - PRE_PROD
-          - PROD
+    branches: [dev, pre-prod]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'pre-prod') ||
-      github.event_name == 'workflow_dispatch'
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
       
-      - name: Determine Target Environment
-        id: set_environment
+      - name: Set Environment
+        id: env
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            ENV_NAME="${{ github.event.inputs.target_environment }}"
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
-            ENV_NAME="PRE_PROD"
-          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
-            ENV_NAME="DEV"
-          elif [ "${{ github.ref }}" == "refs/heads/pre-prod" ]; then
-            ENV_NAME="PRE_PROD"
-          elif [ "${{ github.ref }}" == "refs/heads/prod" ]; then
-            ENV_NAME="PROD"
-          fi
+          set -x  # Enable verbose mode
+          echo "🔍 Detecting environment..."
+          echo "Git ref: ${{ github.ref }}"
           
-          echo "environment_name=$ENV_NAME" >> $GITHUB_OUTPUT
-          
-          if [ "$ENV_NAME" == "DEV" ]; then
-            echo "target_branch=dev" >> $GITHUB_OUTPUT
-            echo "container_name=backend-dev" >> $GITHUB_OUTPUT
-            echo "app_port=3001" >> $GITHUB_OUTPUT
-            echo "secret_prefix=DEV" >> $GITHUB_OUTPUT
-            echo "env_file=.env.dev" >> $GITHUB_OUTPUT
-          elif [ "$ENV_NAME" == "PRE_PROD" ]; then
-            echo "target_branch=pre-prod" >> $GITHUB_OUTPUT
-            echo "container_name=backend-pre-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3002" >> $GITHUB_OUTPUT
-            echo "secret_prefix=PRE_PROD" >> $GITHUB_OUTPUT
-            echo "env_file=.env.pre-prod" >> $GITHUB_OUTPUT
+          if [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+            ENV="DEV"
+            BRANCH="dev"
+            CONTAINER="backend-dev"
+            PORT="3001"
+            ENV_FILE=".env.dev"
           else
-            echo "target_branch=prod" >> $GITHUB_OUTPUT
-            echo "container_name=backend-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3000" >> $GITHUB_OUTPUT
-            echo "secret_prefix=PROD" >> $GITHUB_OUTPUT
-            echo "env_file=.env.prod" >> $GITHUB_OUTPUT
+            ENV="PRE_PROD"
+            BRANCH="pre-prod"
+            CONTAINER="backend-pre-prod"
+            PORT="3002"
+            ENV_FILE=".env.pre-prod"
           fi
+          
+          echo "✅ Environment: $ENV"
+          echo "✅ Branch: $BRANCH"
+          echo "✅ Container: $CONTAINER"
+          echo "✅ Port: $PORT"
+          echo "✅ Env File: $ENV_FILE"
+          
+          echo "env=$ENV" >> $$GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $$GITHUB_OUTPUT
+          echo "container=$CONTAINER" >> $$GITHUB_OUTPUT
+          echo "port=$PORT" >> $$GITHUB_OUTPUT
+          echo "env_file=$ENV_FILE" >> $$GITHUB_OUTPUT
       
       - name: Setup SSH
         run: |
-          mkdir -p ~/.ssh
-          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
+          set -x  # Enable verbose mode
+          echo "🔐 Setting up SSH..."
           
-          if [ "$ENV_PREFIX" == "DEV" ]; then
+          mkdir -p ~/.ssh
+          ENV="${{ steps.env.outputs.env }}"
+          
+          if [ "$ENV" == "DEV" ]; then
+            echo "Using DEV secrets"
             echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_DEV }}" > /tmp/ec2_user.txt
-          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
-            echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/ec2_user.txt
+            echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/host.txt
+            echo "${{ secrets.EC2_USER_DEV }}" > /tmp/user.txt
           else
-            echo "${{ secrets.EC2_SSH_KEY_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PROD }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_PROD }}" > /tmp/ec2_user.txt
+            echo "Using PRE_PROD secrets"
+            echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
+            echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/host.txt
+            echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/user.txt
           fi
           
           chmod 600 ~/.ssh/deploy_key
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
-      
-      - name: Create .env File on EC2
-        run: |
-          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
-          ENV_FILE="${{ steps.set_environment.outputs.env_file }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
+          HOST=$(cat /tmp/host.txt)
+          USER=$(cat /tmp/user.txt)
           
-          if [ "$ENV_PREFIX" == "DEV" ]; then
+          echo "✅ SSH Key: ~/.ssh/deploy_key"
+          echo "✅ Host: $HOST"
+          echo "✅ User: $USER"
+          
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+          echo "✅ SSH keyscan completed"
+      
+      - name: Create .env File
+        run: |
+          set -x  # Enable verbose mode
+          echo "📝 Creating .env file..."
+          
+          ENV="${{ steps.env.outputs.env }}"
+          HOST=$(cat /tmp/host.txt)
+          USER=$(cat /tmp/user.txt)
+          ENV_FILE="${{ steps.env.outputs.env_file }}"
+          
+          if [ "$ENV" == "DEV" ]; then
             MONGODB_URI="${{ secrets.MONGODB_URI_DEV }}"
             JWT_SECRET="${{ secrets.JWT_SECRET_DEV }}"
             JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_DEV }}"
-          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
+          else
             MONGODB_URI="${{ secrets.MONGODB_URI_PRE_PROD }}"
             JWT_SECRET="${{ secrets.JWT_SECRET_PRE_PROD }}"
             JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PRE_PROD }}"
-          else
-            MONGODB_URI="${{ secrets.MONGODB_URI_PROD }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_PROD }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PROD }}"
           fi
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash -c "
+          echo "✅ Env File: $ENV_FILE"
+          echo "✅ MongoDB URI: ${MONGODB_URI:0:20}..." # Show first 20 chars only
+          echo "✅ JWT Secret: ${JWT_SECRET:0:10}..." # Show first 10 chars only
+          echo "✅ JWT Expires: $JWT_EXPIRES_IN"
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -v $USER@$HOST bash -c "
+            set -x
             cd ~/mean-auth-app/backend
-            cat > $ENV_FILE << 'ENVEOF'
-          MONGODB_URI=$MONGODB_URI
-          JWT_SECRET=$JWT_SECRET
-          JWT_EXPIRES_IN=$JWT_EXPIRES_IN
-          ENVEOF
+            echo 'MONGODB_URI=$MONGODB_URI' > $ENV_FILE
+            echo 'JWT_SECRET=$JWT_SECRET' >> $ENV_FILE
+            echo 'JWT_EXPIRES_IN=$JWT_EXPIRES_IN' >> $ENV_FILE
             chmod 600 $ENV_FILE
+            echo '✅ .env file created'
+            cat $ENV_FILE | sed 's/JWT_SECRET=.*/JWT_SECRET=***/' | sed 's/MONGODB_URI=.*/MONGODB_URI=***/'
           "
       
-      - name: Deploy Backend
+      - name: Deploy
         run: |
-          ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
-          TARGET_BRANCH="${{ steps.set_environment.outputs.target_branch }}"
-          CONTAINER_NAME="${{ steps.set_environment.outputs.container_name }}"
-          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
-          ENV_FILE="${{ steps.set_environment.outputs.env_file }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
+          set -x  # Enable verbose mode
+          echo "🚀 Starting deployment..."
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash << EOF
+          BRANCH="${{ steps.env.outputs.branch }}"
+          CONTAINER="${{ steps.env.outputs.container }}"
+          PORT="${{ steps.env.outputs.port }}"
+          ENV_FILE="${{ steps.env.outputs.env_file }}"
+          ENV="${{ steps.env.outputs.env }}"
+          HOST=$(cat /tmp/host.txt)
+          USER=$(cat /tmp/user.txt)
+          
+          echo "📋 Deployment Details:"
+          echo "  Branch: $BRANCH"
+          echo "  Container: $CONTAINER"
+          echo "  Port: $PORT"
+          echo "  Env File: $ENV_FILE"
+          echo "  Environment: $ENV"
+          echo "  Host: $HOST"
+          echo "  User: $USER"
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -v $USER@$HOST bash << 'EOF'
+            set -x
             set -e
+            
+            echo "📂 Changing to project directory..."
             cd ~/mean-auth-app/backend
-            git fetch origin
-            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
-            git pull origin $TARGET_BRANCH
+            pwd
+            ls -la
             
-            # Stop existing containers
-            docker stop $CONTAINER_NAME backend-local 2>/dev/null || true
-            docker rm $CONTAINER_NAME backend-local 2>/dev/null || true
+            echo "🔄 Pulling latest code..."
+            git pull origin $BRANCH || {
+              echo "❌ Git pull failed, trying checkout..."
+              git fetch origin
+              git checkout $BRANCH || git checkout -b $BRANCH origin/$BRANCH
+              git pull origin $BRANCH
+            }
+            echo "✅ Code updated"
             
-            # Set environment variables for docker-compose
-            export CONTAINER_NAME=$CONTAINER_NAME
-            export APP_PORT=$APP_PORT
+            echo "🛑 Stopping old containers..."
+            docker stop $CONTAINER 2>/dev/null || echo "No container to stop"
+            docker rm $CONTAINER 2>/dev/null || echo "No container to remove"
+            
+            echo "🔧 Setting environment variables..."
+            export CONTAINER_NAME=$CONTAINER
+            export APP_PORT=$PORT
             export ENV_FILE=$ENV_FILE
-            export NODE_ENV=\$(echo $ENV_NAME | tr '[:upper:]' '[:lower:]')
+            export NODE_ENV=$(echo $ENV | tr '[:upper:]' '[:lower:]')
             
-            # Deploy
+            echo "  CONTAINER_NAME=$CONTAINER_NAME"
+            echo "  APP_PORT=$APP_PORT"
+            echo "  ENV_FILE=$ENV_FILE"
+            echo "  NODE_ENV=$NODE_ENV"
+            
+            echo "🐳 Building and starting container..."
             docker-compose up -d --build --force-recreate backend
             
+            echo "⏳ Waiting for container to start..."
             sleep 15
-            docker ps | grep $CONTAINER_NAME
-            docker logs $CONTAINER_NAME --tail=30
+            
+            echo "📊 Container status:"
+            docker ps | grep $CONTAINER || echo "❌ Container not running!"
+            
+            echo "📋 Container logs (last 50 lines):"
+            docker logs $CONTAINER --tail=50 || echo "❌ Cannot get logs"
           EOF
       
       - name: Health Check
         run: |
-          CONTAINER_NAME="${{ steps.set_environment.outputs.container_name }}"
-          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
+          set -x  # Enable verbose mode
+          echo "🏥 Starting health check..."
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash << EOF
+          CONTAINER="${{ steps.env.outputs.container }}"
+          HOST=$(cat /tmp/host.txt)
+          USER=$(cat /tmp/user.txt)
+          
+          echo "  Container: $CONTAINER"
+          echo "  Host: $HOST"
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -v $USER@$HOST bash << 'EOF'
+            set -x
+            
+            echo "🔍 Checking container status..."
+            docker ps -a | grep $CONTAINER || echo "❌ Container not found"
+            
+            echo "🔍 Checking if container is running..."
+            if docker ps | grep -q $CONTAINER; then
+              echo "✅ Container is running"
+            else
+              echo "❌ Container is not running"
+              echo "📋 Container logs:"
+              docker logs $CONTAINER --tail=50 || true
+              exit 1
+            fi
+            
+            echo "🏥 Running health checks..."
             for i in {1..5}; do
-              if docker exec $CONTAINER_NAME curl -f -s http://localhost:3000/ > /dev/null; then
+              echo "  Attempt $i/5..."
+              if docker exec $CONTAINER curl -f -s -v http://localhost:3000/ > /tmp/health_response.txt 2>&1; then
                 echo "✅ Health check PASSED"
+                cat /tmp/health_response.txt
                 exit 0
+              else
+                echo "  ❌ Attempt $i failed"
+                cat /tmp/health_response.txt || true
               fi
-              sleep 5
+              [ $i -lt 5 ] && sleep 5
             done
-            echo "❌ Health check FAILED"
-            docker logs $CONTAINER_NAME --tail=30
+            
+            echo "❌ Health check FAILED after 5 attempts"
+            echo "📋 Final container logs:"
+            docker logs $CONTAINER --tail=50
+            echo "📋 Container processes:"
+            docker exec $CONTAINER ps aux || true
             exit 1
           EOF
