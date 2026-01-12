@@ -22,44 +22,29 @@ jobs:
           
           # Deploy
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ubuntu@56.228.81.214 bash << 'EOF'
-            set -e  # Exit on error
+            set -e
             cd ~/mean-auth-app/backend
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             
-            # Load environment variables from .env file
-            if [ -f .env ]; then
-              set -a  # Automatically export all variables
-              source .env
-              set +a
-              echo "✅ Loaded environment variables from .env"
-            else
-              echo "❌ Error: .env file not found"
-              exit 1
-            fi
-            
-            # Verify required variables are set
-            if [ -z "$MONGODB_URI" ] || [ -z "$JWT_SECRET" ]; then
-              echo "❌ Error: Required environment variables (MONGODB_URI, JWT_SECRET) not found in .env"
-              exit 1
-            fi
+            set -a
+            source .env
+            set +a
             
             docker stop backend 2>/dev/null || true
             docker rm backend 2>/dev/null || true
             
-            # Use values from .env or defaults
-            export CONTAINER_NAME=${CONTAINER_NAME:-backend}
-            export APP_PORT=${APP_PORT:-3000}
+            export CONTAINER_NAME=backend
+            export APP_PORT=3000
             export ENV_FILE=.env
-            export NODE_ENV=${NODE_ENV:-production}
+            export NODE_ENV=production
             
-            # Use docker compose (without hyphen) for newer versions, fallback to docker-compose
             docker compose up -d --build backend || docker-compose up -d --build backend
             
             sleep 15
-            docker ps | grep backend || echo "Container not found"
+            docker ps | grep backend
             docker logs backend --tail=30
             
-            # Health check - improved with multiple methods
             for i in {1..5}; do
               if docker exec backend wget -q --spider http://localhost:3000/ 2>/dev/null || \
                  docker exec backend sh -c "nc -z localhost 3000" 2>/dev/null || \
@@ -67,11 +52,9 @@ jobs:
                 echo "✅ Health check PASSED"
                 exit 0
               fi
-              echo "Health check attempt $i failed, retrying..."
               sleep 5
             done
             echo "❌ Health check FAILED"
             docker logs backend --tail=50
-            docker ps -a | grep backend
             exit 1
           EOF
