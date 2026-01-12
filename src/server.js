@@ -22,6 +22,11 @@ app.get('/', (req, res) => {
   res.json({ message: 'MEAN Stack Auth API is running' });
 });
 
+// Simple hello route for CI/CD testing
+app.get('/hello', (req, res) => {
+  res.json({ message: 'hello' });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
