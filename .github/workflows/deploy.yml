@@ -14,18 +14,20 @@ jobs:
         run: |
           # Setup SSH
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          cp "full stack.pem" ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H 56.228.81.214 >> ~/.ssh/known_hosts 2>/dev/null
           
           # Deploy
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} bash << EOF
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ubuntu@56.228.81.214 bash << EOF
             cd ~/mean-auth-app/backend
             git pull origin main
             
-            echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" > .env
-            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
-            echo "JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}" >> .env
+            cat > .env << 'ENVEOF'
+          MONGODB_URI=mongodb+srv://shyamkumbhar509_db_user:6kUz4xLQGc2msUDz@mean-auth.ep0aggw.mongodb.net/mean-auth-dev
+          JWT_SECRET=a9f3b8c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1
+          JWT_EXPIRES_IN=7d
+          ENVEOF
             chmod 600 .env
             
             docker stop backend 2>/dev/null || true
@@ -38,6 +40,21 @@ jobs:
             
             docker-compose up -d --build backend
             
-            sleep 10
-            docker exec backend curl -f -s http://localhost:3000/ > /dev/null || exit 1
+            sleep 15
+            docker ps | grep backend
+            docker logs backend --tail=30
+            
+            # Health check from host (curl available on EC2)
+            sleep 5
+            for i in {1..5}; do
+              if curl -f -s http://localhost:3000/ > /dev/null 2>&1; then
+                echo "✅ Health check PASSED"
+                exit 0
+              fi
+              echo "Attempt $i/5 failed, retrying..."
+              sleep 5
+            done
+            echo "❌ Health check FAILED"
+            docker logs backend --tail=50
+            exit 1
           EOF
