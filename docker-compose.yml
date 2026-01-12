@@ -2,53 +2,46 @@ name: Backend CI/CD
 
 on:
   push:
-    branches: [dev, pre-prod, prod]
-  workflow_dispatch:
+    branches: [dev, pre-prod]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
       
       - name: Set Environment
         id: env
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "env=DEV" >> $GITHUB_OUTPUT
-            echo "branch=dev" >> $GITHUB_OUTPUT
-            echo "container=backend-dev" >> $GITHUB_OUTPUT
-            echo "port=3001" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/pre-prod" ]]; then
-            echo "env=PRE_PROD" >> $GITHUB_OUTPUT
-            echo "branch=pre-prod" >> $GITHUB_OUTPUT
-            echo "container=backend-pre-prod" >> $GITHUB_OUTPUT
-            echo "port=3002" >> $GITHUB_OUTPUT
+          if [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+            echo "env=DEV" >> $$GITHUB_OUTPUT
+            echo "branch=dev" >> $$GITHUB_OUTPUT
+            echo "container=backend-dev" >> $$GITHUB_OUTPUT
+            echo "port=3001" >> $$GITHUB_OUTPUT
+            echo "env_file=.env.dev" >> $$GITHUB_OUTPUT
           else
-            echo "env=PROD" >> $GITHUB_OUTPUT
-            echo "branch=prod" >> $GITHUB_OUTPUT
-            echo "container=backend-prod" >> $GITHUB_OUTPUT
-            echo "port=3000" >> $GITHUB_OUTPUT
+            echo "env=PRE_PROD" >> $$GITHUB_OUTPUT
+            echo "branch=pre-prod" >> $$GITHUB_OUTPUT
+            echo "container=backend-pre-prod" >> $$GITHUB_OUTPUT
+            echo "port=3002" >> $$GITHUB_OUTPUT
+            echo "env_file=.env.pre-prod" >> $$GITHUB_OUTPUT
           fi
       
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           ENV="${{ steps.env.outputs.env }}"
+          
           if [ "$ENV" == "DEV" ]; then
             echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key
             echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/host.txt
             echo "${{ secrets.EC2_USER_DEV }}" > /tmp/user.txt
-          elif [ "$ENV" == "PRE_PROD" ]; then
+          else
             echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
             echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/host.txt
             echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/user.txt
-          else
-            echo "${{ secrets.EC2_SSH_KEY_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PROD }}" > /tmp/host.txt
-            echo "${{ secrets.EC2_USER_PROD }}" > /tmp/user.txt
           fi
+          
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H $(cat /tmp/host.txt) >> ~/.ssh/known_hosts
       
@@ -57,31 +50,23 @@ jobs:
           ENV="${{ steps.env.outputs.env }}"
           HOST=$(cat /tmp/host.txt)
           USER=$(cat /tmp/user.txt)
+          ENV_FILE="${{ steps.env.outputs.env_file }}"
           
           if [ "$ENV" == "DEV" ]; then
             MONGODB_URI="${{ secrets.MONGODB_URI_DEV }}"
             JWT_SECRET="${{ secrets.JWT_SECRET_DEV }}"
             JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_DEV }}"
-            ENV_FILE=".env.dev"
-          elif [ "$ENV" == "PRE_PROD" ]; then
+          else
             MONGODB_URI="${{ secrets.MONGODB_URI_PRE_PROD }}"
             JWT_SECRET="${{ secrets.JWT_SECRET_PRE_PROD }}"
             JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PRE_PROD }}"
-            ENV_FILE=".env.pre-prod"
-          else
-            MONGODB_URI="${{ secrets.MONGODB_URI_PROD }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_PROD }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PROD }}"
-            ENV_FILE=".env.prod"
           fi
           
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash -c "
             cd ~/mean-auth-app/backend
-            cat > $ENV_FILE << 'ENVEOF'
-          MONGODB_URI=$MONGODB_URI
-          JWT_SECRET=$JWT_SECRET
-          JWT_EXPIRES_IN=$JWT_EXPIRES_IN
-          ENVEOF
+            echo 'MONGODB_URI=$MONGODB_URI' > $ENV_FILE
+            echo 'JWT_SECRET=$JWT_SECRET' >> $ENV_FILE
+            echo 'JWT_EXPIRES_IN=$JWT_EXPIRES_IN' >> $ENV_FILE
             chmod 600 $ENV_FILE
           "
       
@@ -90,19 +75,12 @@ jobs:
           BRANCH="${{ steps.env.outputs.branch }}"
           CONTAINER="${{ steps.env.outputs.container }}"
           PORT="${{ steps.env.outputs.port }}"
+          ENV_FILE="${{ steps.env.outputs.env_file }}"
           ENV="${{ steps.env.outputs.env }}"
           HOST=$(cat /tmp/host.txt)
           USER=$(cat /tmp/user.txt)
           
-          if [ "$ENV" == "DEV" ]; then
-            ENV_FILE=".env.dev"
-          elif [ "$ENV" == "PRE_PROD" ]; then
-            ENV_FILE=".env.pre-prod"
-          else
-            ENV_FILE=".env.prod"
-          fi
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << EOF
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << 'EOF'
             set -e
             cd ~/mean-auth-app/backend
             git pull origin $BRANCH
@@ -113,7 +91,7 @@ jobs:
             export CONTAINER_NAME=$CONTAINER
             export APP_PORT=$PORT
             export ENV_FILE=$ENV_FILE
-            export NODE_ENV=\$(echo $ENV | tr '[:upper:]' '[:lower:]')
+            export NODE_ENV=$(echo $ENV | tr '[:upper:]' '[:lower:]')
             
             docker-compose up -d --build --force-recreate backend
             
@@ -128,7 +106,7 @@ jobs:
           HOST=$(cat /tmp/host.txt)
           USER=$(cat /tmp/user.txt)
           
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << EOF
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << 'EOF'
             for i in {1..5}; do
               if docker exec $CONTAINER curl -f -s http://localhost:3000/ > /dev/null; then
                 echo "✅ Health check PASSED"
