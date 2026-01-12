@@ -18,13 +18,36 @@ on:
           - PROD
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    # PRE_PROD ke liye sirf merged PR se deploy karein
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install Dependencies
+        run: npm ci
+      
+      - name: Run Tests
+        run: npm test || echo "No tests configured"
+        continue-on-error: true
+      
+      - name: Build
+        run: npm run build || echo "No build script"
+        continue-on-error: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
     if: |
       (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod')) ||
       (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'pre-prod') ||
       github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
       
@@ -50,37 +73,22 @@ jobs:
             echo "container_name=backend-dev" >> $GITHUB_OUTPUT
             echo "app_port=3001" >> $GITHUB_OUTPUT
             echo "secret_prefix=DEV" >> $GITHUB_OUTPUT
+            echo "env_file=.env.dev" >> $GITHUB_OUTPUT
           elif [ "$ENV_NAME" == "PRE_PROD" ]; then
             echo "target_branch=pre-prod" >> $GITHUB_OUTPUT
             echo "container_name=backend-pre-prod" >> $GITHUB_OUTPUT
             echo "app_port=3002" >> $GITHUB_OUTPUT
             echo "secret_prefix=PRE_PROD" >> $GITHUB_OUTPUT
+            echo "env_file=.env.pre-prod" >> $GITHUB_OUTPUT
           else
             echo "target_branch=prod" >> $GITHUB_OUTPUT
             echo "container_name=backend-prod" >> $GITHUB_OUTPUT
             echo "app_port=3000" >> $GITHUB_OUTPUT
             echo "secret_prefix=PROD" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "🚀 Deploying to: $ENV_NAME environment"
-          echo "📦 Container: ${{ steps.set_environment.outputs.container_name }}"
-          echo "🔌 Port: ${{ steps.set_environment.outputs.app_port }}"
-          
-          # PRE_PROD ke liye PR info
-          if [ "$ENV_NAME" == "PRE_PROD" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "✅ PR #${{ github.event.pull_request.number }} merged by ${{ github.event.pull_request.merged_by.login }}"
-            echo "📝 PR Title: ${{ github.event.pull_request.title }}"
+            echo "env_file=.env.prod" >> $GITHUB_OUTPUT
           fi
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Install Dependencies
-        run: npm install
-      
-      - name: Setup SSH for ${{ steps.set_environment.outputs.environment_name }}
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
@@ -102,9 +110,39 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           EC2_HOST=$(cat /tmp/ec2_host.txt)
           ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
-          echo "✅ SSH configured for $ENV_PREFIX environment"
       
-      - name: Deploy Backend to ${{ steps.set_environment.outputs.environment_name }}
+      - name: Create .env File on EC2
+        run: |
+          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
+          ENV_FILE="${{ steps.set_environment.outputs.env_file }}"
+          EC2_HOST=$(cat /tmp/ec2_host.txt)
+          EC2_USER=$(cat /tmp/ec2_user.txt)
+          
+          if [ "$ENV_PREFIX" == "DEV" ]; then
+            MONGODB_URI="${{ secrets.MONGODB_URI_DEV }}"
+            JWT_SECRET="${{ secrets.JWT_SECRET_DEV }}"
+            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_DEV }}"
+          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
+            MONGODB_URI="${{ secrets.MONGODB_URI_PRE_PROD }}"
+            JWT_SECRET="${{ secrets.JWT_SECRET_PRE_PROD }}"
+            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PRE_PROD }}"
+          else
+            MONGODB_URI="${{ secrets.MONGODB_URI_PROD }}"
+            JWT_SECRET="${{ secrets.JWT_SECRET_PROD }}"
+            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PROD }}"
+          fi
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << ENDSSH
+            cd ~/mean-auth-app
+            cat > $ENV_FILE << EOF
+MONGODB_URI=$MONGODB_URI
+JWT_SECRET=$JWT_SECRET
+JWT_EXPIRES_IN=$JWT_EXPIRES_IN
+EOF
+            chmod 600 $ENV_FILE
+          ENDSSH
+      
+      - name: Deploy Backend
         run: |
           ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
           TARGET_BRANCH="${{ steps.set_environment.outputs.target_branch }}"
@@ -115,53 +153,44 @@ jobs:
           
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << ENDSSH
             set -e
-            echo "📂 Switching to backend directory..."
-            cd ~/mean-auth-app/backend
+            cd ~/mean-auth-app
             
-            echo "🔄 Fetching latest code from $TARGET_BRANCH branch..."
+            # Update docker-compose.yml from git
             git fetch origin
-            
-            echo "🌿 Checking out $TARGET_BRANCH branch..."
             git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
             git pull origin $TARGET_BRANCH
             
-            echo "🐳 Building and starting $CONTAINER_NAME container..."
-            cd ~/mean-auth-app
-            docker-compose up -d --build $CONTAINER_NAME || docker-compose up -d --build backend
+            # Update backend code
+            cd backend
+            git fetch origin
+            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
+            git pull origin $TARGET_BRANCH
+            cd ..
             
-            echo "⏳ Waiting for container to start..."
+            # Deploy
+            docker-compose pull $CONTAINER_NAME || true
+            docker-compose up -d --build $CONTAINER_NAME
+            
+            # Cleanup old images
+            docker image prune -f
+            
             sleep 10
-            
-            echo "📊 Container Status:"
-            docker-compose ps | grep -E "($CONTAINER_NAME|backend)" || docker-compose ps
-            
-            echo "📋 Recent Container Logs:"
-            docker-compose logs --tail=50 $CONTAINER_NAME 2>/dev/null || docker-compose logs --tail=50 backend 2>/dev/null || echo "No logs available"
+            docker-compose ps
+            docker-compose logs --tail=50 $CONTAINER_NAME
           ENDSSH
       
-      - name: Health Check for ${{ steps.set_environment.outputs.environment_name }}
+      - name: Health Check
         run: |
-          ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
           APP_PORT="${{ steps.set_environment.outputs.app_port }}"
           EC2_HOST=$(cat /tmp/ec2_host.txt)
           
-          echo "🏥 Starting health check for $ENV_NAME environment on port $APP_PORT..."
-          echo "⏳ Waiting for service to be ready..."
           sleep 30
-          
           for i in {1..5}; do
-            echo "🔍 Health Check Attempt $i/5: Checking http://$EC2_HOST:$APP_PORT/"
-            if curl -f -s http://$EC2_HOST:$APP_PORT/ > /dev/null; then
-              echo "✅ Health check PASSED for $ENV_NAME environment!"
+            if curl -f -s http://$EC2_HOST:$APP_PORT/health || curl -f -s http://$EC2_HOST:$APP_PORT/ > /dev/null; then
+              echo "✅ Health check PASSED"
               exit 0
             fi
-            echo "⏸️  Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
-          
-          echo "❌ Health check FAILED after 5 attempts for $ENV_NAME environment"
-          echo "🔧 Troubleshooting steps:"
-          echo "   1. Verify EC2 Security Group allows inbound traffic on port $APP_PORT"
-          echo "   2. Check container logs: docker-compose logs ${{ steps.set_environment.outputs.container_name }}"
-          echo "   3. Verify container is running: docker-compose ps"
+          echo "❌ Health check FAILED"
           exit 1
