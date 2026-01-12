@@ -21,7 +21,7 @@ jobs:
       - name: Deploy Backend
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-            cd ~/mean-auth-app-backend
+            cd ~/mean-auth-app/backend
             git pull origin dev
             
             docker stop backend 2>/dev/null || true
