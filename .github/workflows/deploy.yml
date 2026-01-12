@@ -1,175 +1,43 @@
-name: Backend CI/CD - Multi Environment
+name: Backend CI/CD
 
 on:
   push:
-    branches: [dev, pre-prod, prod]
-  pull_request:
-    types: [closed]
-    branches: [pre-prod]
-  workflow_dispatch:
-    inputs:
-      target_environment:
-        description: 'Target Environment'
-        required: true
-        type: choice
-        options:
-          - DEV
-          - PRE_PROD
-          - PROD
+    branches: [main]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'pre-prod') ||
-      github.event_name == 'workflow_dispatch'
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
       
-      - name: Determine Target Environment
-        id: set_environment
+      - name: Deploy
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            ENV_NAME="${{ github.event.inputs.target_environment }}"
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
-            ENV_NAME="PRE_PROD"
-          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
-            ENV_NAME="DEV"
-          elif [ "${{ github.ref }}" == "refs/heads/pre-prod" ]; then
-            ENV_NAME="PRE_PROD"
-          elif [ "${{ github.ref }}" == "refs/heads/prod" ]; then
-            ENV_NAME="PROD"
-          fi
-          
-          echo "environment_name=$ENV_NAME" >> $GITHUB_OUTPUT
-          
-          if [ "$ENV_NAME" == "DEV" ]; then
-            echo "target_branch=dev" >> $GITHUB_OUTPUT
-            echo "container_name=backend-dev" >> $GITHUB_OUTPUT
-            echo "app_port=3001" >> $GITHUB_OUTPUT
-            echo "secret_prefix=DEV" >> $GITHUB_OUTPUT
-            echo "env_file=.env.dev" >> $GITHUB_OUTPUT
-          elif [ "$ENV_NAME" == "PRE_PROD" ]; then
-            echo "target_branch=pre-prod" >> $GITHUB_OUTPUT
-            echo "container_name=backend-pre-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3002" >> $GITHUB_OUTPUT
-            echo "secret_prefix=PRE_PROD" >> $GITHUB_OUTPUT
-            echo "env_file=.env.pre-prod" >> $GITHUB_OUTPUT
-          else
-            echo "target_branch=prod" >> $GITHUB_OUTPUT
-            echo "container_name=backend-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3000" >> $GITHUB_OUTPUT
-            echo "secret_prefix=PROD" >> $GITHUB_OUTPUT
-            echo "env_file=.env.prod" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Setup SSH
-        run: |
+          # Setup SSH
           mkdir -p ~/.ssh
-          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
-          
-          if [ "$ENV_PREFIX" == "DEV" ]; then
-            echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_DEV }}" > /tmp/ec2_user.txt
-          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
-            echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/ec2_user.txt
-          else
-            echo "${{ secrets.EC2_SSH_KEY_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PROD }}" > /tmp/ec2_host.txt
-            echo "${{ secrets.EC2_USER_PROD }}" > /tmp/ec2_user.txt
-          fi
-          
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
-      
-      - name: Create .env File on EC2
-        run: |
-          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
-          ENV_FILE="${{ steps.set_environment.outputs.env_file }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
           
-          if [ "$ENV_PREFIX" == "DEV" ]; then
-            MONGODB_URI="${{ secrets.MONGODB_URI_DEV }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_DEV }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_DEV }}"
-          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
-            MONGODB_URI="${{ secrets.MONGODB_URI_PRE_PROD }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_PRE_PROD }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PRE_PROD }}"
-          else
-            MONGODB_URI="${{ secrets.MONGODB_URI_PROD }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_PROD }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PROD }}"
-          fi
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash -c "
+          # Deploy
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} bash << EOF
             cd ~/mean-auth-app/backend
-            cat > $ENV_FILE << 'ENVEOF'
-          MONGODB_URI=$MONGODB_URI
-          JWT_SECRET=$JWT_SECRET
-          JWT_EXPIRES_IN=$JWT_EXPIRES_IN
-          ENVEOF
-            chmod 600 $ENV_FILE
-          "
-      
-      - name: Deploy Backend
-        run: |
-          ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
-          TARGET_BRANCH="${{ steps.set_environment.outputs.target_branch }}"
-          CONTAINER_NAME="${{ steps.set_environment.outputs.container_name }}"
-          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
-          ENV_FILE="${{ steps.set_environment.outputs.env_file }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash << EOF
-            set -e
-            cd ~/mean-auth-app/backend
-            git fetch origin
-            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
-            git pull origin $TARGET_BRANCH
+            git pull origin main
             
-            # Stop existing containers
-            docker stop $CONTAINER_NAME backend-local 2>/dev/null || true
-            docker rm $CONTAINER_NAME backend-local 2>/dev/null || true
+            echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" > .env
+            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
+            echo "JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}" >> .env
+            chmod 600 .env
             
-            # Set environment variables for docker-compose
-            export CONTAINER_NAME=$CONTAINER_NAME
-            export APP_PORT=$APP_PORT
-            export ENV_FILE=$ENV_FILE
-            export NODE_ENV=\$(echo $ENV_NAME | tr '[:upper:]' '[:lower:]')
+            docker stop backend 2>/dev/null || true
+            docker rm backend 2>/dev/null || true
             
-            # Deploy
-            docker-compose up -d --build --force-recreate backend
+            export CONTAINER_NAME=backend
+            export APP_PORT=3000
+            export ENV_FILE=.env
+            export NODE_ENV=production
             
-            sleep 15
-            docker ps | grep $CONTAINER_NAME
-            docker logs $CONTAINER_NAME --tail=30
-          EOF
-      
-      - name: Health Check
-        run: |
-          CONTAINER_NAME="${{ steps.set_environment.outputs.container_name }}"
-          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
-          EC2_HOST=$(cat /tmp/ec2_host.txt)
-          EC2_USER=$(cat /tmp/ec2_user.txt)
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST bash << EOF
-            for i in {1..5}; do
-              if docker exec $CONTAINER_NAME curl -f -s http://localhost:3000/ > /dev/null; then
-                echo "✅ Health check PASSED"
-                exit 0
-              fi
-              sleep 5
-            done
-            echo "❌ Health check FAILED"
-            docker logs $CONTAINER_NAME --tail=30
-            exit 1
+            docker-compose up -d --build backend
+            
+            sleep 10
+            docker exec backend curl -f -s http://localhost:3000/ > /dev/null || exit 1
           EOF

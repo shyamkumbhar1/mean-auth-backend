@@ -1,120 +1,23 @@
-name: Backend CI/CD
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ${CONTAINER_NAME:-backend-local}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+    volumes:
+      - .:/app
+      - /app/node_modules
+    restart: unless-stopped
+    networks:
+      - backend-network
 
-on:
-  push:
-    branches: [dev, pre-prod]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Set Environment
-        id: env
-        run: |
-          if [ "${{ github.ref }}" == "refs/heads/dev" ]; then
-            echo "env=DEV" >> $$GITHUB_OUTPUT
-            echo "branch=dev" >> $$GITHUB_OUTPUT
-            echo "container=backend-dev" >> $$GITHUB_OUTPUT
-            echo "port=3001" >> $$GITHUB_OUTPUT
-            echo "env_file=.env.dev" >> $$GITHUB_OUTPUT
-          else
-            echo "env=PRE_PROD" >> $$GITHUB_OUTPUT
-            echo "branch=pre-prod" >> $$GITHUB_OUTPUT
-            echo "container=backend-pre-prod" >> $$GITHUB_OUTPUT
-            echo "port=3002" >> $$GITHUB_OUTPUT
-            echo "env_file=.env.pre-prod" >> $$GITHUB_OUTPUT
-          fi
-      
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          ENV="${{ steps.env.outputs.env }}"
-          
-          if [ "$ENV" == "DEV" ]; then
-            echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/host.txt
-            echo "${{ secrets.EC2_USER_DEV }}" > /tmp/user.txt
-          else
-            echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
-            echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/host.txt
-            echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/user.txt
-          fi
-          
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H $(cat /tmp/host.txt) >> ~/.ssh/known_hosts
-      
-      - name: Create .env File
-        run: |
-          ENV="${{ steps.env.outputs.env }}"
-          HOST=$(cat /tmp/host.txt)
-          USER=$(cat /tmp/user.txt)
-          ENV_FILE="${{ steps.env.outputs.env_file }}"
-          
-          if [ "$ENV" == "DEV" ]; then
-            MONGODB_URI="${{ secrets.MONGODB_URI_DEV }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_DEV }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_DEV }}"
-          else
-            MONGODB_URI="${{ secrets.MONGODB_URI_PRE_PROD }}"
-            JWT_SECRET="${{ secrets.JWT_SECRET_PRE_PROD }}"
-            JWT_EXPIRES_IN="${{ secrets.JWT_EXPIRES_IN_PRE_PROD }}"
-          fi
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash -c "
-            cd ~/mean-auth-app/backend
-            echo 'MONGODB_URI=$MONGODB_URI' > $ENV_FILE
-            echo 'JWT_SECRET=$JWT_SECRET' >> $ENV_FILE
-            echo 'JWT_EXPIRES_IN=$JWT_EXPIRES_IN' >> $ENV_FILE
-            chmod 600 $ENV_FILE
-          "
-      
-      - name: Deploy
-        run: |
-          BRANCH="${{ steps.env.outputs.branch }}"
-          CONTAINER="${{ steps.env.outputs.container }}"
-          PORT="${{ steps.env.outputs.port }}"
-          ENV_FILE="${{ steps.env.outputs.env_file }}"
-          ENV="${{ steps.env.outputs.env }}"
-          HOST=$(cat /tmp/host.txt)
-          USER=$(cat /tmp/user.txt)
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << 'EOF'
-            set -e
-            cd ~/mean-auth-app/backend
-            git pull origin $BRANCH
-            
-            docker stop $CONTAINER 2>/dev/null || true
-            docker rm $CONTAINER 2>/dev/null || true
-            
-            export CONTAINER_NAME=$CONTAINER
-            export APP_PORT=$PORT
-            export ENV_FILE=$ENV_FILE
-            export NODE_ENV=$(echo $ENV | tr '[:upper:]' '[:lower:]')
-            
-            docker-compose up -d --build --force-recreate backend
-            
-            sleep 15
-            docker ps | grep $CONTAINER
-            docker logs $CONTAINER --tail=30
-          EOF
-      
-      - name: Health Check
-        run: |
-          CONTAINER="${{ steps.env.outputs.container }}"
-          HOST=$(cat /tmp/host.txt)
-          USER=$(cat /tmp/user.txt)
-          
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USER@$HOST bash << 'EOF'
-            for i in {1..5}; do
-              if docker exec $CONTAINER curl -f -s http://localhost:3000/ > /dev/null; then
-                echo "✅ Health check PASSED"
-                exit 0
-              fi
-              sleep 5
-            done
-            echo "❌ Health check FAILED"
-            docker logs $CONTAINER --tail=30
-            exit 1
-          EOF
+networks:
+  backend-network:
+    driver: bridge
