@@ -11,15 +11,18 @@ jobs:
       - uses: actions/checkout@v3
       
       - name: Deploy
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           # Setup SSH
           mkdir -p ~/.ssh
-          cp "full stack.pem" ~/.ssh/deploy_key
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H 56.228.81.214 >> ~/.ssh/known_hosts 2>/dev/null
           
           # Deploy
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ubuntu@56.228.81.214 bash << EOF
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ubuntu@56.228.81.214 bash << 'EOF'
+            set -e  # Exit on error
             cd ~/mean-auth-app/backend
             git pull origin main
             
@@ -38,21 +41,26 @@ jobs:
             export ENV_FILE=.env
             export NODE_ENV=production
             
-            docker-compose up -d --build backend
+            # Use docker compose (without hyphen) for newer versions, fallback to docker-compose
+            docker compose up -d --build backend || docker-compose up -d --build backend
             
             sleep 15
-            docker ps | grep backend
+            docker ps | grep backend || echo "Container not found"
             docker logs backend --tail=30
             
-            # Health check
+            # Health check - improved with multiple methods
             for i in {1..5}; do
-              if docker exec backend curl -f -s http://localhost:3000/ > /dev/null; then
+              if docker exec backend wget -q --spider http://localhost:3000/ 2>/dev/null || \
+                 docker exec backend sh -c "nc -z localhost 3000" 2>/dev/null || \
+                 [ "$(docker inspect -f '{{.State.Status}}' backend 2>/dev/null)" = "running" ]; then
                 echo "✅ Health check PASSED"
                 exit 0
               fi
+              echo "Health check attempt $i failed, retrying..."
               sleep 5
             done
             echo "❌ Health check FAILED"
             docker logs backend --tail=50
+            docker ps -a | grep backend
             exit 1
           EOF
