@@ -1,61 +1,167 @@
-name: Backend CI/CD
+name: Backend CI/CD - Multi Environment
 
 on:
   push:
-    branches: [main, master]
+    branches: [dev, pre-prod, main]
+  pull_request:
+    types: [closed]
+    branches: [pre-prod]
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'Target Environment'
+        required: true
+        type: choice
+        options:
+          - DEV
+          - PRE_PROD
+          - PROD
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # PRE_PROD ke liye sirf merged PR se deploy karein
+    if: |
+      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'pre-prod') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v3
+      
+      - name: Determine Target Environment
+        id: set_environment
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV_NAME="${{ github.event.inputs.target_environment }}"
+          elif [ "${{ github.event_name }}" == "pull_request" ]; then
+            ENV_NAME="PRE_PROD"
+          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+            ENV_NAME="DEV"
+          elif [ "${{ github.ref }}" == "refs/heads/pre-prod" ]; then
+            ENV_NAME="PRE_PROD"
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            ENV_NAME="PROD"
+          fi
+          
+          echo "environment_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          
+          if [ "$ENV_NAME" == "DEV" ]; then
+            echo "target_branch=dev" >> $GITHUB_OUTPUT
+            echo "container_name=backend-dev" >> $GITHUB_OUTPUT
+            echo "app_port=3001" >> $GITHUB_OUTPUT
+            echo "secret_prefix=DEV" >> $GITHUB_OUTPUT
+          elif [ "$ENV_NAME" == "PRE_PROD" ]; then
+            echo "target_branch=pre-prod" >> $GITHUB_OUTPUT
+            echo "container_name=backend-pre-prod" >> $GITHUB_OUTPUT
+            echo "app_port=3002" >> $GITHUB_OUTPUT
+            echo "secret_prefix=PRE_PROD" >> $GITHUB_OUTPUT
+          else
+            echo "target_branch=main" >> $GITHUB_OUTPUT
+            echo "container_name=backend-prod" >> $GITHUB_OUTPUT
+            echo "app_port=3000" >> $GITHUB_OUTPUT
+            echo "secret_prefix=PROD" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "🚀 Deploying to: $ENV_NAME environment"
+          echo "📦 Container: ${{ steps.set_environment.outputs.container_name }}"
+          echo "🔌 Port: ${{ steps.set_environment.outputs.app_port }}"
+          
+          # PRE_PROD ke liye PR info
+          if [ "$ENV_NAME" == "PRE_PROD" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "✅ PR #${{ github.event.pull_request.number }} merged by ${{ github.event.pull_request.merged_by.login }}"
+            echo "📝 PR Title: ${{ github.event.pull_request.title }}"
+          fi
       
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
       
-      - name: Install dependencies
+      - name: Install Dependencies
         run: npm install
       
-      - name: Setup SSH
+      - name: Setup SSH for ${{ steps.set_environment.outputs.environment_name }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          ENV_PREFIX="${{ steps.set_environment.outputs.secret_prefix }}"
+          
+          if [ "$ENV_PREFIX" == "DEV" ]; then
+            echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key
+            echo "${{ secrets.EC2_HOST_DEV }}" > /tmp/ec2_host.txt
+            echo "${{ secrets.EC2_USER_DEV }}" > /tmp/ec2_user.txt
+          elif [ "$ENV_PREFIX" == "PRE_PROD" ]; then
+            echo "${{ secrets.EC2_SSH_KEY_PRE_PROD }}" > ~/.ssh/deploy_key
+            echo "${{ secrets.EC2_HOST_PRE_PROD }}" > /tmp/ec2_host.txt
+            echo "${{ secrets.EC2_USER_PRE_PROD }}" > /tmp/ec2_user.txt
+          else
+            echo "${{ secrets.EC2_SSH_KEY_PROD }}" > ~/.ssh/deploy_key
+            echo "${{ secrets.EC2_HOST_PROD }}" > /tmp/ec2_host.txt
+            echo "${{ secrets.EC2_USER_PROD }}" > /tmp/ec2_user.txt
+          fi
+          
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          EC2_HOST=$(cat /tmp/ec2_host.txt)
+          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
+          echo "✅ SSH configured for $ENV_PREFIX environment"
       
-      - name: Deploy to EC2
+      - name: Deploy Backend to ${{ steps.set_environment.outputs.environment_name }}
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
+          ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
+          TARGET_BRANCH="${{ steps.set_environment.outputs.target_branch }}"
+          CONTAINER_NAME="${{ steps.set_environment.outputs.container_name }}"
+          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
+          EC2_HOST=$(cat /tmp/ec2_host.txt)
+          EC2_USER=$(cat /tmp/ec2_user.txt)
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << ENDSSH
             set -e
+            echo "📂 Switching to backend directory..."
             cd ~/mean-auth-app/backend
-            git pull origin main || git pull origin master
-            cd ..
-            docker-compose up -d --build backend
-            echo "Waiting for container to start..."
+            
+            echo "🔄 Fetching latest code from $TARGET_BRANCH branch..."
+            git fetch origin
+            
+            echo "🌿 Checking out $TARGET_BRANCH branch..."
+            git checkout $TARGET_BRANCH 2>/dev/null || git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
+            git pull origin $TARGET_BRANCH
+            
+            echo "🐳 Building and starting $CONTAINER_NAME container..."
+            cd ~/mean-auth-app
+            docker-compose up -d --build $CONTAINER_NAME || docker-compose up -d --build backend
+            
+            echo "⏳ Waiting for container to start..."
             sleep 10
-            echo "Container status:"
-            docker-compose ps
-            echo "Container logs:"
-            docker-compose logs --tail=50 backend
+            
+            echo "📊 Container Status:"
+            docker-compose ps | grep -E "($CONTAINER_NAME|backend)" || docker-compose ps
+            
+            echo "📋 Recent Container Logs:"
+            docker-compose logs --tail=50 $CONTAINER_NAME 2>/dev/null || docker-compose logs --tail=50 backend 2>/dev/null || echo "No logs available"
           ENDSSH
       
-      - name: Health Check
+      - name: Health Check for ${{ steps.set_environment.outputs.environment_name }}
         run: |
-          echo "Waiting for service to be ready..."
+          ENV_NAME="${{ steps.set_environment.outputs.environment_name }}"
+          APP_PORT="${{ steps.set_environment.outputs.app_port }}"
+          EC2_HOST=$(cat /tmp/ec2_host.txt)
+          
+          echo "🏥 Starting health check for $ENV_NAME environment on port $APP_PORT..."
+          echo "⏳ Waiting for service to be ready..."
           sleep 30
+          
           for i in {1..5}; do
-            echo "Attempt $i: Checking health..."
-            if curl -f -s http://${{ secrets.EC2_HOST }}:3000/ > /dev/null; then
-              echo "✅ Health check passed!"
+            echo "🔍 Health Check Attempt $i/5: Checking http://$EC2_HOST:$APP_PORT/"
+            if curl -f -s http://$EC2_HOST:$APP_PORT/ > /dev/null; then
+              echo "✅ Health check PASSED for $ENV_NAME environment!"
               exit 0
             fi
+            echo "⏸️  Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
-          echo "❌ Health check failed after 5 attempts"
-          echo "Please check:"
-          echo "1. EC2 Security Group - Port 3000 should be open"
-          echo "2. Container logs: ssh to EC2 and run 'docker-compose logs backend'"
+          
+          echo "❌ Health check FAILED after 5 attempts for $ENV_NAME environment"
+          echo "🔧 Troubleshooting steps:"
+          echo "   1. Verify EC2 Security Group allows inbound traffic on port $APP_PORT"
+          echo "   2. Check container logs: docker-compose logs ${{ steps.set_environment.outputs.container_name }}"
+          echo "   3. Verify container is running: docker-compose ps"
           exit 1
